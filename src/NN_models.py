@@ -389,12 +389,14 @@ class SelfSupervisedNet2(nn.Module):
         model_save_path = self.config['torch']['SSL_models'] + 'model2_' + str(len(os.listdir(self.config['torch']['SSL_models'])))
         utils.makedirs(model_save_path)
 
+        print('training SSL model2...')
         for epoch in range(epochs):
             self.train(mode=True)
 
             running_loss = 0
             counter = 0
             for i, data in enumerate(train_dataloader):
+                print('dataloader:', i)
                 optimizer.zero_grad()
 
                 output = self.forward(data['features'].to(self.device, dtype=torch.float))
@@ -612,11 +614,11 @@ class EcgNet(nn.Module):
         modified_target = np.zeros((target.shape[0], 1))
         modified_preds  = np.zeros((target.shape[0], 1))
 
-        modified_target[ind[(target[:,0]>2.5) & (target[:,1]>4.5)]]  = 1
+        modified_target[ind[(target[:,0]>2.5) & (target[:,1]>=3.5)]]  = 1
         modified_target[ind[(target[:,0]>2.5) & (target[:,1]<3.5)]]  = 2
         modified_target[ind[(target[:,0]<=2.5)]] = 3
 
-        modified_preds[ind[(prediction[:,0]>2.5) & (prediction[:,1]>4.5)]]  = 1
+        modified_preds[ind[(prediction[:,0]>2.5) & (prediction[:,1]>=3.5)]]  = 1
         modified_preds[ind[(prediction[:,0]>2.5) & (prediction[:,1]<3.5)]]  = 2
         modified_preds[ind[(prediction[:,0]<=2.5)]] = 3
 
@@ -790,7 +792,7 @@ class EcgNet(nn.Module):
         predictions = np.concatenate(predictions, axis=0)
         
         return predictions
-                                       
+
 # Multi-modal EMOTION recognition net 
 class EmotionNet(nn.Module):
 
@@ -816,17 +818,17 @@ class EmotionNet(nn.Module):
         # self.loss_criterion = nn.SmoothL1Loss(reduction='sum')
 
     def fully_connect_block(self, in_features, out_features, dropout_prob):
-        
+        max_features = 512
         dense = nn.Sequential(
-            nn.Linear(in_features=in_features, out_features=512),
+            nn.Linear(in_features=in_features, out_features=max_features),
             nn.ReLU(),
             nn.Dropout(p=dropout_prob),
 
-            nn.Linear(in_features=512, out_features=512),
+            nn.Linear(in_features=max_features, out_features=max_features),
             nn.ReLU(),
             nn.Dropout(p=dropout_prob),
 
-            nn.Linear(in_features=512, out_features=256),
+            nn.Linear(in_features=max_features, out_features=256),
             nn.ReLU(),
             # nn.Dropout(p=dropout_prob),
 
@@ -834,7 +836,9 @@ class EmotionNet(nn.Module):
             nn.ReLU(),
             # nn.Dropout(p=dropout_prob),
 
-            nn.Linear(in_features=128, out_features=out_features)
+            nn.Linear(in_features=128, out_features=out_features),
+            # nn.Linear(in_features=128, out_features=out_features),
+            # nn.ReLU()
 
         )
 
@@ -999,20 +1003,31 @@ class EmotionNet(nn.Module):
             arousal_train = np.concatenate(arousal_train, axis=0)
             valence_train = np.concatenate(valence_train, axis=0)
 
+            error_thres = 0.7
+            arousal_small_train = 100. * float(np.extract(arousal_train < error_thres, arousal_train).shape[0]) / float(arousal_train.shape[0])
+            valence_small_train = 100. * float(np.extract(valence_train < error_thres, valence_train).shape[0]) / float(valence_train.shape[0])
+
             arousal_valid = np.concatenate(arousal_valid, axis=0)
             valence_valid = np.concatenate(valence_valid, axis=0)
+
+            arousal_small_valid = 100. * float(np.extract(arousal_valid < error_thres, arousal_valid).shape[0]) / float(arousal_valid.shape[0])
+            valence_small_valid = 100. * float(np.extract(valence_valid < error_thres, valence_valid).shape[0]) / float(valence_valid.shape[0])
 
             self.writer.add_scalar('Training Loss', running_loss/counter, epoch+1)
             self.writer.add_scalar('Arousal Training error', np.mean(arousal_train), epoch+1)
             self.writer.add_scalar('Valence Training error', np.mean(valence_train), epoch+1)
+            self.writer.add_scalar('Arousal Training error < thres', arousal_small_train, epoch+1)
+            self.writer.add_scalar('Valence Training error < thres', valence_small_train, epoch+1)
             self.writer.add_scalar('training 3-dim accuracy', np.mean(train_3dim_accuracy), epoch+1)
 
             self.writer.add_scalar('Arousal Validation error', np.mean(arousal_valid), epoch+1)
             self.writer.add_scalar('Valence Validation error', np.mean(valence_valid), epoch+1)
+            self.writer.add_scalar('Arousal Validation error < thres', arousal_small_valid, epoch+1)
+            self.writer.add_scalar('Valence Validation error < thres', valence_small_valid, epoch+1)
             self.writer.add_scalar('Validation 3-dim accuracy', np.mean(valid_3dim_accuracy), epoch+1)
 
             # print('Loss: {0:.3f}, Arousal : {1:.3f}, Valence : {2:.3f} at epoch: {3:d}'.format(running_loss/counter, np.mean(arousal_train), np.mean(valence_train), epoch+1))
-            print('Training Loss: {0:.3f}, Train-Arousal : {1:.3f}, Train-Valence : {2:.3f}, Valid-Arousal: {3:.3f}, Valid-Valence: {4:.3f}, Valid-3dim: {5:.3f} at epoch: {6:d}'.format(running_loss/counter, np.mean(arousal_train), np.mean(valence_train), np.mean(arousal_valid), np.mean(valence_valid), np.mean(valid_3dim_accuracy), epoch+1))
+            print('Training Loss: {0:.3f}, Train [A : {1:.3f}, A<{7:.1f} : {8:.3f}, V : {2:.3f}, V<{7:.1f} : {9:.3f}], Valid [A: {3:.3f}, A<{7:.1f} : {10:.3f}, V : {4:.3f}, V<{7:.1f} : {11:.3f}, 3dim: {5:.3f}] at epoch: {6:d}'.format(running_loss/counter, np.mean(arousal_train), np.mean(valence_train), np.mean(arousal_valid), np.mean(valence_valid), np.mean(valid_3dim_accuracy), epoch+1, error_thres, arousal_small_train, valence_small_train, arousal_small_valid, valence_small_valid))
             
             running_loss = 0
             if scheduler:
@@ -1119,10 +1134,44 @@ class EmotionNet(nn.Module):
         predictions = np.concatenate(predictions, axis=0)
         
         return predictions
-        
 
-            
- 
+
+# Multi-modal EMOTION recognition using LSTM
+class EmotionNetLSTM(EmotionNet):
+
+    def __init__(self, num_feats, seq_len, device=torch.device("cpu"), config=[]):
+        super(EmotionNetLSTM, self).__init__(num_feats, device=device, config=config)
+        n_lstm_layers = 1
+        self.seq_len = seq_len
+        # output (arousal, valence)
+        self.lstm_hidden_size = 128
+        lstm = nn.LSTM(num_feats, self.lstm_hidden_size, n_lstm_layers, batch_first=True)
+        dense = self.fully_connect_block(self.lstm_hidden_size, 2, 0.0)
+        self.dense_net = nn.ModuleDict({
+            'lstm': lstm,
+            'dense': dense
+            })
+
+
+    def forward(self, x):
+        # [seq_len * batch, num_feat] -> [batch, seq_len, num_feat] (note batch_first=True)
+        x_input = x.view(-1, self.seq_len, self.num_feat)
+        lstm_output, _ = self.dense_net['lstm'](x_input)
+        #print('lstm output size:', lstm_output.shape)
+        #print('lstm output:', lstm_output)
+        # [batch, seq_len, lstm_hidden] -> last output [batch, lstm_hidden]
+        dense_input = lstm_output[:,-1,:].reshape(-1, self.lstm_hidden_size)
+        #print('dense_input size:', dense_input.shape)
+        #print('dense_input:', dense_input)
+        dense_output = self.dense_net['dense'](dense_input)
+        #print('dense_output size:', dense_output.shape)
+        #print('dense_output:', dense_output)
+        # repeat each row seq_len times to match the size of ground truth label data
+        pred = dense_output.repeat(1, self.seq_len).reshape(-1, 2)
+        #print('pred size:', pred.shape)
+        #print('pred:', pred)
+        return pred
+
 
 ##########################################################################
 # ------ ECG features from pretrained Self Supervised Network ------ #
