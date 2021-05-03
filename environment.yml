@@ -176,4 +176,4 @@ dependencies:
     - pysiology==0.0.9.4
     - samplerate==0.1.0
     - tables==3.6.1
-prefix: /home/sujjavapapu/miniconda3/envs/ss_emotion
+prefix: /home/kyamane/miniconda3/envs/ss_emotion
