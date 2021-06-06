@@ -8,6 +8,7 @@ import os
 import sys
 import numpy as np
 import yaml
+from collections import OrderedDict
 from pathlib import Path
 import matplotlib.pyplot as plt 
 from mpl_toolkits.mplot3d import Axes3D
@@ -354,7 +355,7 @@ class SelfSupervisedNet2(nn.Module):
         x = self.conv_layer2(x)
         x = F.max_pool1d(x, kernel_size=8, stride=2)
 
-        x = self.conv_layer3(x)        
+        x = self.conv_layer3(x)
         x = F.max_pool1d(x, kernel_size=x.size()[-1]) # global max pooling
         # x = torch.amax(x, dim=-1) # alternative way of max pooling
 
@@ -396,7 +397,6 @@ class SelfSupervisedNet2(nn.Module):
             running_loss = 0
             counter = 0
             for i, data in enumerate(train_dataloader):
-                print('dataloader:', i)
                 optimizer.zero_grad()
 
                 output = self.forward(data['features'].to(self.device, dtype=torch.float))
@@ -807,15 +807,18 @@ class EmotionNet(nn.Module):
         self.device = device
 
         # fully connected layers for recognizing arousal and valence levels
-        self.dense_net = self.fully_connect_block(self.num_feat, 2, 0.25)
+        if self.num_feat > 0:
+            self.dense_net = self.fully_connect_block(self.num_feat, 2, 0.25)
+            # self.dense_net = self.fully_connect_block(self.num_feat, 2, 0.1)
 
-        # weight initialization of network
-        self.weight_init()
+            # weight initialization of network
+            self.weight_init()
 
-        # objective function
-        self.loss_criterion = nn.MSELoss(reduction='sum')
-        # self.loss_criterion = nn.L1Loss(reduction='sum')
-        # self.loss_criterion = nn.SmoothL1Loss(reduction='sum')
+            # objective function
+            self.loss_criterion = nn.MSELoss(reduction='sum')
+            # self.loss_criterion = nn.L1Loss(reduction='sum')
+            # self.loss_criterion = nn.SmoothL1Loss(reduction='sum')
+
 
     def fully_connect_block(self, in_features, out_features, dropout_prob):
         max_features = 512
@@ -837,7 +840,6 @@ class EmotionNet(nn.Module):
             # nn.Dropout(p=dropout_prob),
 
             nn.Linear(in_features=128, out_features=out_features),
-            # nn.Linear(in_features=128, out_features=out_features),
             # nn.ReLU()
 
         )
@@ -905,20 +907,24 @@ class EmotionNet(nn.Module):
         """Use Arousal-Valence dimensional model (2d plane) for calculating 
         the accuracy labels assigned in anticlockwise direction
         quadrant1 : class1, quadrant2: class2, quadrant3 and 4: class3"""
-        target = np.round(labels.numpy().reshape(-1, 2))
-        prediction = np.round(output.numpy())
+        target = labels.numpy().reshape(-1, 2)
+        prediction = output.numpy()
 
         ind = np.arange(target.shape[0])
         modified_target = np.zeros((target.shape[0], 1))
         modified_preds  = np.zeros((target.shape[0], 1))
 
-        modified_target[ind[(target[:,0]>2.5) & (target[:,1]>4.5)]]  = 1
-        modified_target[ind[(target[:,0]>2.5) & (target[:,1]<3.5)]]  = 2
-        modified_target[ind[(target[:,0]<=2.5)]] = 3
+        modified_target[ind[(target[:,0]>=2.8) & (target[:,1]>=4.)]]  = 1
+        modified_target[ind[(target[:,0]>=2.8) & (target[:,1]<4.)]]  = 2
+        modified_target[ind[(target[:,0]<2.8) & (target[:,1]>=5.)]]  = 1
+        modified_target[ind[(target[:,0]<2.8) & (target[:,1]<5.) & (target[:,1]>=3.)]] = 3
+        modified_target[ind[(target[:,0]<2.8) & (target[:,1]<3.)]]  = 2
 
-        modified_preds[ind[(prediction[:,0]>2.5) & (prediction[:,1]>4.5)]]  = 1
-        modified_preds[ind[(prediction[:,0]>2.5) & (prediction[:,1]<3.5)]]  = 2
-        modified_preds[ind[(prediction[:,0]<=2.5)]] = 3
+        modified_preds[ind[(prediction[:,0]>=2.8) & (prediction[:,1]>=4.)]]  = 1
+        modified_preds[ind[(prediction[:,0]>=2.8) & (prediction[:,1]<4.)]]  = 2
+        modified_preds[ind[(prediction[:,0]<2.8) & (prediction[:,1]>=5.)]]  = 1
+        modified_preds[ind[(prediction[:,0]<2.8) & (prediction[:,1]<5.) & (prediction[:,1]>=3.)]] = 3
+        modified_preds[ind[(prediction[:,0]<2.8) & (prediction[:,1]<3.)]]  = 2
 
         total = np.max(target.shape) # multi output
         
@@ -937,6 +943,11 @@ class EmotionNet(nn.Module):
 
         model_save_path = self.config['torch']['EMOTION_models'] + "MultiModal_model" + "_" + str(len(os.listdir(self.config['torch']['EMOTION_models'])))
         utils.makedirs(model_save_path)
+
+        error_thres = 0.7
+        color0 = [0., 1., 0.]  # a_err < 0.7 and v_err < 0.7
+        color1 = [1., 1., 0.]  # a_err < 0.7 or v_err < 0.7
+        color2 = [1., 0., 0.]  # a_err >= 0.7 and v_err >= 0.7
 
         _, ax = plt.subplots(1, 2)
         for epoch in range(epochs):
@@ -975,8 +986,20 @@ class EmotionNet(nn.Module):
                 valence_train.append(val)
                 train_3dim_accuracy.append(self.three_dim_accuracy(output.detach().to('cpu'), data['labels'].detach().to('cpu')))
 
-                ax[0].plot(output.detach().to('cpu').numpy()[:, 1], output.detach().to('cpu').numpy()[:, 0], 'r.', label='Predicted')
-                ax[0].plot(data['labels'].detach().to('cpu')[:, 1], data['labels'].detach().to('cpu')[:, 0], 'b.', label='True')
+                output_cpu = output.detach().to('cpu').numpy()
+                labels_cpu = data['labels'].detach().to('cpu')
+                ind = np.arange(0, labels_cpu.shape[0])
+                ind_small_da = set(ind[ars < error_thres])
+                ind_small_dv = set(ind[val < error_thres])
+                ind_large_da = set(ind.tolist()).difference(ind_small_da)
+                ind_large_dv = set(ind.tolist()).difference(ind_small_dv)
+                ind0 = list(ind_small_da.intersection(ind_small_dv))
+                ind2 = list(ind_large_da.intersection(ind_large_dv))
+                ind1 = list(set(ind.tolist()).difference(ind0).difference(ind2))
+                ax[0].plot(output_cpu[ind2, 1], output_cpu[ind2, 0], '.', color=color2, label='Predicted (da>0.7 and dv>0.7)')
+                ax[0].plot(output_cpu[ind1, 1], output_cpu[ind1, 0], '.', color=color1, label='Predicted (da<0.7 or dv<0.7)')
+                ax[0].plot(output_cpu[ind0, 1], output_cpu[ind0, 0], '.', color=color0, label='Predicted (da<0.7 and dv<0.7)')
+                ax[0].plot(labels_cpu[:, 1], labels_cpu[:, 0], 'b.', label='True')
 
             # Validation the model 
             self.eval() # equivalent to self.train(mode=False) (disregards Dropout and Batchnorm during testing the network)
@@ -988,46 +1011,60 @@ class EmotionNet(nn.Module):
 
                 valid_data['features'].to(torch.device('cpu')) # remove the validation data from cuda
                 # print(torch.cuda.memory_summary(device=self.device))
-                
+
                 # arousal_acc, valence_acc  = self.net_accuracy(valid_output.detach().to('cpu'), valid_data['labels'].detach().to('cpu'))
                 arousal_ae, valence_ae = self.absolute_error(valid_output.detach().to('cpu'), valid_data['labels'].detach().to('cpu'))
                 val1_accuracy = self.three_dim_accuracy(valid_output.detach().to('cpu'), valid_data['labels'].detach().to('cpu'))
-                
+
                 arousal_valid.append(arousal_ae)
                 valence_valid.append(valence_ae)
                 valid_3dim_accuracy.append(val1_accuracy)
-                
-                ax[1].plot(valid_output.detach().to('cpu').numpy()[:, 1], valid_output.detach().to('cpu').numpy()[:, 0], 'r.')
-                ax[1].plot(valid_data['labels'].detach().to('cpu')[:, 1], valid_data['labels'].detach().to('cpu')[:, 0], 'b.')
-            
+
+                output_cpu = valid_output.detach().to('cpu').numpy()
+                labels_cpu = valid_data['labels'].detach().to('cpu')
+                ind = np.arange(0, labels_cpu.shape[0])
+                ind_small_da = set(ind[arousal_ae < error_thres])
+                ind_small_dv = set(ind[valence_ae < error_thres])
+                ind_large_da = set(ind.tolist()).difference(ind_small_da)
+                ind_large_dv = set(ind.tolist()).difference(ind_small_dv)
+                ind0 = list(ind_small_da.intersection(ind_small_dv))
+                ind2 = list(ind_large_da.intersection(ind_large_dv))
+                ind1 = list(set(ind.tolist()).difference(ind0).difference(ind2))
+                ax[1].plot(output_cpu[ind2, 1], output_cpu[ind2, 0], '.', color=color2, label='Predicted (da>0.7 and dv>0.7)')
+                ax[1].plot(output_cpu[ind1, 1], output_cpu[ind1, 0], '.', color=color1, label='Predicted (da<0.7 or dv<0.7)')
+                ax[1].plot(output_cpu[ind0, 1], output_cpu[ind0, 0], '.', color=color0, label='Predicted (da<0.7 and dv<0.7)')
+                ax[1].plot(labels_cpu[:, 1], labels_cpu[:, 0], 'b.', label='True')
+
             arousal_train = np.concatenate(arousal_train, axis=0)
             valence_train = np.concatenate(valence_train, axis=0)
 
-            error_thres = 0.7
             arousal_small_train = 100. * float(np.extract(arousal_train < error_thres, arousal_train).shape[0]) / float(arousal_train.shape[0])
             valence_small_train = 100. * float(np.extract(valence_train < error_thres, valence_train).shape[0]) / float(valence_train.shape[0])
+            both_small_train = 100. * float(np.extract(np.logical_and(arousal_train < error_thres, valence_train < error_thres), arousal_train).shape[0]) / float(arousal_train.shape[0])
 
             arousal_valid = np.concatenate(arousal_valid, axis=0)
             valence_valid = np.concatenate(valence_valid, axis=0)
 
             arousal_small_valid = 100. * float(np.extract(arousal_valid < error_thres, arousal_valid).shape[0]) / float(arousal_valid.shape[0])
             valence_small_valid = 100. * float(np.extract(valence_valid < error_thres, valence_valid).shape[0]) / float(valence_valid.shape[0])
+            both_small_valid = 100. * float(np.extract(np.logical_and(arousal_valid < error_thres, valence_valid < error_thres), arousal_valid).shape[0]) / float(arousal_valid.shape[0])
 
             self.writer.add_scalar('Training Loss', running_loss/counter, epoch+1)
             self.writer.add_scalar('Arousal Training error', np.mean(arousal_train), epoch+1)
             self.writer.add_scalar('Valence Training error', np.mean(valence_train), epoch+1)
             self.writer.add_scalar('Arousal Training error < thres', arousal_small_train, epoch+1)
             self.writer.add_scalar('Valence Training error < thres', valence_small_train, epoch+1)
+            self.writer.add_scalar('Both Training error < thres', both_small_train, epoch+1)
             self.writer.add_scalar('training 3-dim accuracy', np.mean(train_3dim_accuracy), epoch+1)
 
             self.writer.add_scalar('Arousal Validation error', np.mean(arousal_valid), epoch+1)
             self.writer.add_scalar('Valence Validation error', np.mean(valence_valid), epoch+1)
             self.writer.add_scalar('Arousal Validation error < thres', arousal_small_valid, epoch+1)
             self.writer.add_scalar('Valence Validation error < thres', valence_small_valid, epoch+1)
+            self.writer.add_scalar('Both Validation error < thres', both_small_valid, epoch+1)
             self.writer.add_scalar('Validation 3-dim accuracy', np.mean(valid_3dim_accuracy), epoch+1)
 
-            # print('Loss: {0:.3f}, Arousal : {1:.3f}, Valence : {2:.3f} at epoch: {3:d}'.format(running_loss/counter, np.mean(arousal_train), np.mean(valence_train), epoch+1))
-            print('Training Loss: {0:.3f}, Train [A : {1:.3f}, A<{7:.1f} : {8:.3f}, V : {2:.3f}, V<{7:.1f} : {9:.3f}], Valid [A: {3:.3f}, A<{7:.1f} : {10:.3f}, V : {4:.3f}, V<{7:.1f} : {11:.3f}, 3dim: {5:.3f}] at epoch: {6:d}'.format(running_loss/counter, np.mean(arousal_train), np.mean(valence_train), np.mean(arousal_valid), np.mean(valence_valid), np.mean(valid_3dim_accuracy), epoch+1, error_thres, arousal_small_train, valence_small_train, arousal_small_valid, valence_small_valid))
+            print('[{6:d}] Loss: {0:.3f}, Train [A: {1:.3f}, A<{7:.1f}: {8:.3f}, V: {2:.3f}, V<{7:.1f}: {9:.3f}, AV<{7:.1f}: {13:.3f}, 3dim: {12:.3f}], Valid [A: {3:.3f}, A<{7:.1f}: {10:.3f}, V: {4:.3f}, V<{7:.1f}: {11:.3f}, AV<{7:.1f}: {14:.3f}, 3dim: {5:.3f}]'.format(running_loss/counter, np.mean(arousal_train), np.mean(valence_train), np.mean(arousal_valid), np.mean(valence_valid), np.mean(valid_3dim_accuracy), epoch+1, error_thres, arousal_small_train, valence_small_train, arousal_small_valid, valence_small_valid, np.mean(train_3dim_accuracy), both_small_train, both_small_valid))
             
             running_loss = 0
             if scheduler:
@@ -1134,6 +1171,127 @@ class EmotionNet(nn.Module):
         predictions = np.concatenate(predictions, axis=0)
         
         return predictions
+
+
+# Multi-modal EMOTION recognition using raw data and Conv1d
+class EmotionNetConv1d(EmotionNet):
+
+    def __init__(self, seq_length, num_in_channels=1, device=torch.device("cpu"), config=[]):
+        super(EmotionNetConv1d, self).__init__(num_feats=0, device=device, config=config)
+
+        self.seq_length = seq_length
+        self.num_in_channels = num_in_channels
+
+        # self.network = 'small'
+        self.network = 'large'
+        # self.network = 'larger'  # NG
+
+        if self.network == 'small':
+            self.num_conv_out_channels = 64
+            self.max_fully_connect_size = 128
+            self.conv_layer1 = self.conv_block(self.num_in_channels, 32, 16, 4, 0.1)
+            self.conv_layer2 = self.conv_block(32, self.num_conv_out_channels, 8, 2, 0.1, last_layer=True)
+            self.conv_layer3 = None
+            self.dense_net = self.fully_connect_block(self.num_conv_out_channels, 2, 0.25)
+
+        elif self.network == 'large':
+            self.num_conv_out_channels = 128
+            self.max_fully_connect_size = 256
+            self.conv_layer1 = self.conv_block(self.num_in_channels, 32, 16, 4, 0.1)
+            self.conv_layer2 = self.conv_block(32, 64, 8, 2, 0.1)
+            self.conv_layer3 = self.conv_block(64, self.num_conv_out_channels, 4, 1, 0.1, last_layer=True)
+            self.dense_net = self.fully_connect_block(self.num_conv_out_channels, 2, 0.25)
+
+        elif self.network == 'larger':
+            self.num_conv_out_channels = 256
+            self.max_fully_connect_size = 256
+            self.conv_layer1 = self.conv_block(self.num_in_channels, 64, 16, 4, 0.1)
+            self.conv_layer2 = self.conv_block(64, 128, 8, 2, 0.1)
+            self.conv_layer3 = self.conv_block(128, self.num_conv_out_channels, 4, 1, 0.1, last_layer=True)
+            self.dense_net = self.fully_connect_block(self.num_conv_out_channels, 2, 0.25)
+
+        # weight initialization of network
+        self.weight_init()
+
+        self.loss_criterion = nn.MSELoss(reduction='sum')
+
+
+    def conv_block(self, in_channels, out_channels, kernel_size, stride, dropout_prob, last_layer=False):
+        # pad the layers such that the output has the same size of input
+        if (kernel_size - 1) % 2 == 0:
+            pad_left  = int((kernel_size - 1) / 2)
+            pad_right = int((kernel_size - 1) / 2)
+        else:
+            pad_left  = int(kernel_size / 2 )
+            pad_right = int(kernel_size / 2 - 1)
+
+        layers = OrderedDict()
+        layers['pad0'] = nn.ConstantPad1d(padding=(pad_left, pad_right), value=0)
+        layers['conv0'] = nn.Conv1d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride)
+        layers['relu0'] = nn.LeakyReLU()
+        layers['dropout0'] = nn.Dropout(p=dropout_prob)
+
+        layers['pad1'] = nn.ConstantPad1d(padding=(pad_left, pad_right), value=0)
+        layers['conv1'] = nn.Conv1d(in_channels=out_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride)
+        layers['relu1'] = nn.LeakyReLU()
+        layers['dropout1'] = nn.Dropout(p=dropout_prob)
+
+        if last_layer:
+            # layers['pool'] = nn.AdaptiveAvgPool1d(1)
+            layers['pool'] = nn.AdaptiveMaxPool1d(1)
+        else:
+            # layers['pool'] = nn.AvgPool1d(kernel_size=8, stride=2)
+            layers['pool'] = nn.MaxPool1d(kernel_size=4, stride=2)
+
+        conv = nn.Sequential(layers)
+        return conv
+
+
+    def fully_connect_block(self, in_features, out_features, dropout_prob):
+        layers = OrderedDict()
+        layers['dense0'] = nn.Linear(in_features=in_features, out_features=self.max_fully_connect_size)
+        layers['relu0'] = nn.ReLU()
+        layers['dropout0'] = nn.Dropout(p=dropout_prob)
+
+        out_size = self.max_fully_connect_size
+        i_layer = 1
+        while out_size >= 64:
+            layers['dense' + str(i_layer)] = nn.Linear(in_features=out_size, out_features=round(out_size/2))
+            layers['relu' + str(i_layer)] = nn.ReLU()
+            if out_size >= 128:
+                layers['dropout' + str(i_layer)] = nn.Dropout(p=dropout_prob)
+
+            out_size = round(out_size / 2)
+            i_layer += 1
+
+        # last layer
+        layers['dense' + str(i_layer)] = nn.Linear(in_features=out_size, out_features=out_features)
+
+        print('fully_connect_block: number of layers=', i_layer+1)
+
+        dense = nn.Sequential(layers)
+        return dense
+
+
+    def forward(self, x):
+        # conv1d layers
+        conv_in = x.view(-1, self.num_in_channels, self.seq_length)
+        conv_out = self.conv_layer1(conv_in)
+        # conv_out = F.max_pool1d(conv_out, kernel_size=8, stride=2)
+        # conv_out = F.avg_pool1d(conv_out, kernel_size=8, stride=2)
+        conv_out = self.conv_layer2(conv_out)
+        if self.conv_layer3 != None:
+            # conv_out = F.max_pool1d(conv_out, kernel_size=8, stride=2)
+            # conv_out = F.avg_pool1d(conv_out, kernel_size=8, stride=2)
+            conv_out = self.conv_layer3(conv_out)
+
+        # conv_out = F.max_pool1d(conv_out, kernel_size=conv_out.size()[-1]) # global max pooling
+        # conv_out = F.avg_pool1d(conv_out, kernel_size=conv_out.size()[-1]) # global max pooling
+        # flatten the output
+        conv_out = conv_out.view(-1, self.num_conv_out_channels)
+        # dense layer
+        pred = self.dense_net(conv_out)
+        return pred
 
 
 # Multi-modal EMOTION recognition using LSTM

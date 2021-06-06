@@ -2,6 +2,8 @@ import sys
 import os
 import yaml
 import time
+import random
+import math
 import numpy as np
 import deepdish as dd
 import matplotlib.pyplot as plt
@@ -28,7 +30,7 @@ from sklearn.preprocessing import StandardScaler
 
 import xgboost as xgb
 
-from NN_models import SelfSupervisedNet, SelfSupervisedNet2, SelfSupervisedNetFeats, EcgNet, EmotionNet, EmotionNetLSTM
+from NN_models import SelfSupervisedNet, SelfSupervisedNet2, SelfSupervisedNetFeats, EcgNet, EmotionNet, EmotionNetLSTM, EmotionNetConv1d
 from NN_datasets import EcgDataset, EcgFeatDataset, MultiFeatDataset
 
 from data_preprocessing import (read_raw_dreamer_dataset, read_raw_wesad_dataset, 
@@ -107,7 +109,7 @@ with skip_run('skip', 'prepare raw dataset for ECG-SSL') as check, check():
 # katsu: same as above but includes transition
 with skip_run('skip', 'prepare raw dataset for ECG-SSL with transition') as check, check():
     # create data files
-    read_raw_hri_dataset_with_transition(config['hri']['load_path'], config, save_path=config['hri']['interim_transition'], standardize=True, transition_delay_time=1.0)
+    read_raw_hri_dataset_with_transition(config['hri']['load_path'], config, save_path=config['hri']['interim_transition'], standardize=True, transition_delay_time=config['hri']['transition_delay_time'])
 
     hri_data = []
     hri_labels = []
@@ -191,7 +193,7 @@ with skip_run('skip', 'prepare transform dataset with transition') as check, che
 
     ecg_train, ecg_test, ecg_valid = [], [], []
     y_train, y_test, y_valid = [], [], []
-    interval = 2
+    interval = 4
 
     print('transform training data...')
     for i in range(0, Data['ECG_train'].shape[0], interval):
@@ -329,7 +331,7 @@ with skip_run('skip', 'train SSL model2') as check, check():
 
 
 # same as above but with transition
-with skip_run('run', 'train SSL model2 with transition') as check, check():
+with skip_run('skip', 'train SSL model2 with transition') as check, check():
     # create the directories to store the runs and pickle models
     if ~os.path.exists("runs/SSL_runs"):
         utils.makedirs("runs/SSL_runs")
@@ -337,7 +339,7 @@ with skip_run('run', 'train SSL model2 with transition') as check, check():
     if ~os.path.exists("models/SSL_models"):
         utils.makedirs("models/SSL_models")
 
-    batch_size = 64
+    batch_size = 128
     window_size = config['freq'] * config['window_size']
     task_weights = [0.195, 0.195, 0.195, 0.0125, 0.0125, 0.195, 0.195]
 
@@ -360,7 +362,7 @@ with skip_run('run', 'train SSL model2 with transition') as check, check():
     optimizer = optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-3)
     scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
 
-    net.train_model(train_dataloader, valid_dataloader, optimizer, scheduler=scheduler, batch_size=batch_size, epochs=200, task_weights=task_weights)
+    net.train_model(train_dataloader, valid_dataloader, optimizer, scheduler=scheduler, batch_size=batch_size, epochs=100, task_weights=task_weights)
 
 
 # Test the desired self supervised learning model 
@@ -492,7 +494,8 @@ with skip_run('skip', 'extract ECG-SSL features for each individual with transit
     batch_size = 128
     window_size = config['freq'] * config['window_size']
 
-    ckpt_file  = 'model2_1/net_200.pth'
+    # ckpt_file  = 'model2_1/net_200.pth' # Sri's best model (steady-state)
+    ckpt_file  = 'model2_6/net_100.pth' # first dynamic model
     print('loading model')
     checkpoint = torch.load(config['torch']['SSL_models'] + ckpt_file, map_location=device)
     net = SelfSupervisedNetFeats(load_model=True, checkpoint=checkpoint, device=device, config=config).to(device)
@@ -531,13 +534,15 @@ with skip_run('skip', 'Extract all handcrafted features from each modality for i
 
 
 # katsu: same as above but with transition
-# currently unsable because this generates a bunch of errors
 with skip_run('skip', 'Extract all handcrafted features from each modality for individual with transition') as check, check():
     data_dic = dd.io.load(config['hri']['interim_transition'])
     Data = collections.defaultdict(dict)
-    for subject in data_dic:
+    # for subject in data_dic:
+    for subject in ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9', 'S10', 'S11']:
+        print('====== subject:', subject)
         data = collections.defaultdict(dict)
         for event in data_dic[subject]:
+            print('---- event:', event)
             features = extract_all_features(data_dic[subject][event], config)
             data[event] = features
 
@@ -1814,22 +1819,250 @@ with skip_run('skip', 'Segregated data based on the Image categories') as check,
 ##############################################################
 # learn dynamics model from windows spanning multiple images #
 ##############################################################
-with skip_run('skip', 'Learn dynamics model from windows spanning multiple images') as check, check():
+## using raw data and Conv1d
+with skip_run('run', 'Learn dynamics model using raw data from windows spanning multiple images') as check, check():
+    train_model = True
+    data_dic = dd.io.load(config['hri']['interim_transition'])
+    # dictionary of subject: [train_ratio, test_ratio]
+    target_subs = {'S3': [0.2, 0.8],
+                   }
+
+    # 'ECG', 'EMG', 'GSR', or 'PPG'
+    # modalities = ['ECG', 'EMG', 'PPG', 'GSR']
+    modalities = ['ECG', 'EMG', 'PPG']
+    # modalities = ['ECG', 'PPG']
+    # modalities = ['ECG', 'EMG']
+    # modalities = ['ECG']
+    # modalities = ['ECG', 'PPG', 'GSR']
+    # modalities = ['ECG', 'EMG', 'GSR']
+    # modalities = ['ECG', 'GSR']
+
+    event_end_idx = []
+    event_sub = []
+    Features, Labels = [], []
+    num_in_channels = 0
+    max_frames = 0
+
+    # count the number of channels; EMG has 3
+    # find the modality with the largest data rate
+    for modality in modalities:
+        if config['hri']['sfreq'][modality.lower()] * config['window_size'] > max_frames:
+            max_frames = config['hri']['sfreq'][modality.lower()] * config['window_size']
+
+        if modality == 'EMG':
+            num_in_channels += 3
+        else:
+            num_in_channels += 1
+
+    print('max_frames:', max_frames)
+    #for sub in data:
+    for sub in target_subs.keys():
+        print('sub:', sub)
+        for event in data_dic[sub]:
+            features, labels = [], []
+            labels = data_dic[sub][event]['labels']
+            for modality in modalities:
+                if modality == 'EMG':
+                    n_channels = 3
+                else:
+                    n_channels = 1
+
+                org_data = data_dic[sub][event][modality]
+                # org_data: [n_windows, n_channels, n_frames]
+                print(modality, ' org_data shape:', org_data.shape)
+                # resample to make the number of frames in a window becomes the same
+                interval = float(max_frames / org_data.shape[2])
+                new_data = np.zeros([org_data.shape[0], org_data.shape[1], max_frames])
+                for i in range(org_data.shape[2]):
+                    cur_index = round(interval * i)
+                    next_index = round(interval * (i+1))
+                    new_data[:, :, cur_index:next_index] = org_data[:, :, i:i+1]
+
+                features.append(new_data)
+                print(modality, ' new shape:', features[-1].shape)
+
+            n_windows = min([f.shape[0] for f in features])
+            n_frames = min([f.shape[2] for f in features])
+            features = [f[0:n_windows, :, 0:n_frames] for f in features]
+            features = np.concatenate(features, axis=1)
+            print('features size:', features.shape)
+            Features.append(features)
+            Labels.append(labels)
+            event_sub.append(sub)
+            if len(event_end_idx) > 0:
+                event_end_idx.append(event_end_idx[-1] + labels.shape[0])
+            else:
+                event_end_idx.append(labels.shape[0])
+
+            print('event:', event, ', labels.shape:', labels.shape, ', event_end_idx:', event_end_idx[-1])
+
+    Features = np.concatenate(Features, axis=0)
+    Labels   = np.concatenate(Labels, axis=0)
+
+    print('Features shape (all):', Features.shape)
+    print('Labels shape (all):', Labels.shape)
+    print('event_end_idx:', event_end_idx)
+    print('event_sub:', event_sub)
+
+    # categorize into neutral, positive, negative images
+    label_first_idx = [0]
+    label_list = [Labels[0, :]]
+    label_sub = [event_sub[0]]
+    for i in range(1, Labels.shape[0]):
+        if Labels[i-1, 0] != Labels[i, 0] or Labels[i-1, 1] != Labels[i, 1]:
+            label_first_idx.append(i)
+            label_list.append(Labels[i, :])
+            event_idx = next(idx for idx, f in enumerate(event_end_idx) if f >= i)
+            label_sub.append(event_sub[event_idx])
+
+    categories = []
+    cat_sub = []
+    for i, (label, sub) in enumerate(zip(label_list, label_sub)):
+        if label[0] < 2.8:
+            if label[1] >= 3. and label[1] < 5.:
+                categories.append(0)
+
+            elif label[1] >= 5.:
+                categories.append(1)
+
+            else:
+                categories.append(-1)
+
+        else:
+            if label[1] < 4.:
+                categories.append(-1)
+
+            else:
+                categories.append(1)
+
+        cat_sub.append(sub)
+        # print(i, label, sub, categories[-1])
+
+        # check if neutral images come every other frame
+        if categories[-1] == 0:
+            if len(categories) > 1 and categories[-2] == 0:
+                print('---- order error ----')
+
+            elif len(categories) > 2 and categories[-3] != 0:
+                print('---- order error ----')
+
+        else:
+            if len(categories) > 1 and categories[-2] != 0:
+                print('---- order error ----')
+
+            elif len(categories) > 2 and categories[-3] == 0:
+                print('---- order error ----')
+
+    per_train_data, RF_ars_mean, RF_val_mean, NN_ars_mean, NN_val_mean = [], [], [], [], []
+    RF_ars_err, RF_val_err, NN_ars_err, NN_val_err = [], [], [], []
+
+    # use event1 for training and event2 for testing
+    '''
+    train_ind = range(0, sequence_length * (event_end_idx[0] // sequence_length))
+    test_ind = range(event_end_idx[0], event_end_idx[0] + sequence_length * ((event_end_idx[1] - event_end_idx[0]) // sequence_length))
+    '''
+    # randomly divide into training and testing set
+    train_ind = []
+    test_ind = []
+    random.seed(10)
+    dt = 1.0 - config['hri']['percent_overlap']
+    n_backward_frames = round((config['hri']['event_window'] + config['hri']['transition_delay_time'] - config['window_size']) / dt)
+    n_forward_frames = round((config['window_size'] - config['hri']['transition_delay_time']) / dt)
+    print('n_backward_frames:', n_backward_frames, ', n_forward_frames:', n_forward_frames)
+    for i, (cat, sub) in enumerate(zip(categories, cat_sub)):
+        # find non-neutral image sandwitched by neutral images
+        if i > 0 and i < len(categories)-1 and cat != 0 and categories[i-1] == 0 and categories[i+1] == 0:
+            start_idx = max(0, label_first_idx[i] - n_backward_frames)
+            end_idx = min(Labels.shape[0], label_first_idx[i+1] + n_forward_frames)
+            # ignore if event_end_idx is in [start_idx, end_idx)
+            event_border = False
+            for idx in event_end_idx:
+                if idx >= start_idx and idx < end_idx:
+                    event_border = True
+                    break
+            if event_border:
+                continue
+            #print(i, ': cat=', cat, ' label_first_idx=', label_first_idx[i], ', [', start_idx, ',', end_idx, ')')
+            r = random.random()
+            if r <= target_subs[sub][0]:
+                train_ind.extend(range(start_idx, end_idx))
+
+            elif r <= target_subs[sub][0] + target_subs[sub][1]:
+                test_ind.extend(range(start_idx, end_idx))
+
+    train_dataset = {'features': Features[train_ind, :],
+                     'labels': Labels[train_ind, :]}
+    test_dataset = {'features': Features[test_ind, :],
+                    'labels': Labels[test_ind, :]}
+
+    print('train feature shape:', train_dataset['features'].shape, ', label shape:', train_dataset['labels'].shape)
+    print('test feature shape:', test_dataset['features'].shape, ', label shape:', test_dataset['labels'].shape)
+
+    train_data = MultiFeatDataset(train_dataset, balance_data=False)
+    test_data  = MultiFeatDataset(test_dataset, balance_data=False)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    batch_size = 128
+    net = EmotionNetConv1d(seq_length=train_dataset['features'].shape[2], num_in_channels=train_dataset['features'].shape[1], device=device, config=config)
+
+    net.to(device)
+
+    train_dataloader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=False)
+    test_dataloader  = torch.utils.data.DataLoader(test_data, batch_size=batch_size, shuffle=False)
+
+    # see if an exponential decay learning rate scheduler is required
+    # optimizer = optim.SGD(net.parameters(), lr=0.01, momentum=0.9)
+    optimizer = optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-3)
+    # optimizer = optim.Adam(net.parameters(), lr=1e-3)
+    scheduler = None
+    # scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
+
+    if train_model:
+        print('Train the model on: {}'.format(device))
+        NN_trn_ars, NN_trn_val, NN_tst_ars, NN_tst_val = net.train_model(train_dataloader, test_dataloader, optimizer, scheduler=scheduler, batch_size=batch_size, epochs=3000)
+    else:
+        torch_file = 'MultiModal_model_' + str(NN_model_dic[str(step_size)]) + '/net_500.pth'
+
+        checkpoint = torch.load(config['torch']['EMOTION_models'] + torch_file, map_location=device)
+        fig, ax = plt.subplots(1, 2)
+        fig.suptitle('DNN')
+
+        trn_results = net.validate_model(train_dataloader, optimizer, checkpoint, device=torch.device('cpu'), ax=ax[0])
+        tst_results = net.validate_model(test_dataloader, optimizer, checkpoint, device=torch.device('cpu'), ax=ax[1])
+
+        NN_trn_ars = trn_results['Arousal']
+        NN_trn_val = trn_results['Valence']
+        NN_tst_ars = tst_results['Arousal']
+        NN_tst_val = tst_results['Valence']
+
+    input('press any key to end ...')
+    sys.exit(0)
+
+
+## using SSL features for ECG and hand-crafted features for other modalities
+with skip_run('skip', 'Learn dynamics model using features from windows spanning multiple images') as check, check():
     train_model = True
     # number of LSTM cells; if 1, use regular DNN
     # sequence_length = 11
     sequence_length = 1
 
     # load data: SSL
-    # data = dd.io.load(config['hri_feats_transition'])
+    data = dd.io.load(config['hri_feats_transition'])
     data_ECG_SSL = dd.io.load(config['hri_ECG_SSL_feats_transition'])
 
     Features, Labels = [], []
 
     event_end_idx = []
-    target_subs = ['S5']
-    #modalities = ['EMG', 'GSR', 'PPG', 'RSP']
-    modalities = []
+    target_subs = ['S1']
+    # 'ECG-SSL', 'ECG', 'EMG', 'GSR', or 'PPG'
+    # modalities = ['ECG-SSL', 'EMG', 'PPG', 'GSR']
+    # modalities = ['ECG-SSL', 'EMG', 'PPG']
+    # modalities = ['ECG-SSL', 'PPG']
+    modalities = ['ECG-SSL', 'EMG']
+    # modalities = ['ECG-SSL']
+    # modalities = ['ECG-SSL', 'PPG', 'GSR']
+    # modalities = ['ECG-SSL', 'EMG', 'GSR']
+    # modalities = ['ECG-SSL', 'GSR']
     #for sub in data:
     for sub in target_subs:
         print('sub:', sub)
@@ -1837,14 +2070,20 @@ with skip_run('skip', 'Learn dynamics model from windows spanning multiple image
             features, labels = [], []
             labels = data_ECG_SSL[sub][event]['labels']
 
-            # use ECG-SSL, EMG, GSR, PPG for regression
-            features.append(data_ECG_SSL[sub][event]['ECG'].reshape(data_ECG_SSL[sub][event]['ECG'].shape[0], -1))
             for modality in modalities:
-                if modality in data[sub][event].keys():
+                if modality == 'ECG-SSL':
+                    features.append(data_ECG_SSL[sub][event]['ECG'].reshape(data_ECG_SSL[sub][event]['ECG'].shape[0], -1))
+                    print(modality, ' size:', features[-1].shape)
+
+                elif modality in data[sub][event].keys():
                     # normalize the features and then append them for DNN, it does not matter for Random Forest
                     scaler = StandardScaler()
                     features.append(scaler.fit_transform(data[sub][event][modality].reshape(data[sub][event][modality].shape[0], -1)))
+                    print(modality, ' size:', features[-1].shape)
 
+            n_frames = min([f.shape[0] for f in features])
+            print('n_frames:', n_frames)
+            features = [f[0:n_frames, :] for f in features]
             features = np.concatenate(features, axis=1)
 
             Features.append(features)
@@ -1864,39 +2103,38 @@ with skip_run('skip', 'Learn dynamics model from windows spanning multiple image
     # categorize into neutral, positive, negative images
     label_first_idx = [0]
     label_list = [Labels[0, :]]
-    for i in range(Labels.shape[0]):
-        if i > 0:
-            if Labels[i-1, 0] != Labels[i, 0] or Labels[i-1, 1] != Labels[i, 1]:
-                label_first_idx.append(i)
-                label_list.append(Labels[i, :])
+    for i in range(1, Labels.shape[0]):
+        if Labels[i-1, 0] != Labels[i, 0] or Labels[i-1, 1] != Labels[i, 1]:
+            label_first_idx.append(i)
+            label_list.append(Labels[i, :])
 
     categories = []
     pos_image_ids = []
     neg_image_ids = []
     for i, label in enumerate(label_list):
-        if label[0] <= 2.5:
-            if label[1] >= 2.5 and label[1] <= 4.5:
-                # print(i, label, ' neutral')
+        if label[0] < 2.8:
+            if label[1] >= 3. and label[1] < 5.:
+                print(i, label, ' neutral')
                 categories.append(0)
 
-            elif label[1] > 4.5:
-                # print(i, label, ' positive')
+            elif label[1] >= 5.:
+                print(i, label, ' positive')
                 categories.append(1)
                 pos_image_ids.append(i)
 
             else:
-                # print(i, label, ' negative')
+                print(i, label, ' negative')
                 categories.append(-1)
                 neg_image_ids.append(i)
 
         else:
-            if label[1] < 3.5:
-                # print(i, label, ' negative')
+            if label[1] < 4.:
+                print(i, label, ' negative')
                 categories.append(-1)
                 neg_image_ids.append(i)
 
             else:
-                # print(i, label, ' positive')
+                print(i, label, ' positive')
                 categories.append(1)
                 pos_image_ids.append(i)
 
@@ -1919,14 +2157,48 @@ with skip_run('skip', 'Learn dynamics model from windows spanning multiple image
     RF_ars_err, RF_val_err, NN_ars_err, NN_val_err = [], [], [], []
 
     # use event1 for training and event2 for testing
+    '''
     train_ind = range(0, sequence_length * (event_end_idx[0] // sequence_length))
     test_ind = range(event_end_idx[0], event_end_idx[0] + sequence_length * ((event_end_idx[1] - event_end_idx[0]) // sequence_length))
+    '''
+    # randomly divide into training and testing set
+    train_ind = []
+    test_ind = []
+    random.seed(10)
+    training_ratio = 0.5
+    dt = 1.0 - config['hri']['percent_overlap']
+    n_backward_frames = round((config['hri']['event_window'] + config['hri']['transition_delay_time'] - config['window_size']) / dt)
+    n_forward_frames = round((config['window_size'] - config['hri']['transition_delay_time']) / dt)
+    print('n_backward_frames:', n_backward_frames, ', n_forward_frames:', n_forward_frames)
+    for i, cat in enumerate(categories):
+        # find non-neutral image sandwitched by neutral images
+        if i > 0 and i < len(categories)-1 and cat != 0 and categories[i-1] == 0 and categories[i+1] == 0:
+            start_idx = max(0, label_first_idx[i] - n_backward_frames)
+            end_idx = min(Labels.shape[0], label_first_idx[i+1] + n_forward_frames)
+            # ignore if event_end_idx is in [start_idx, end_idx)
+            event_border = False
+            for idx in event_end_idx:
+                if idx >= start_idx and idx < end_idx:
+                    event_border = True
+                    break
+            if event_border:
+                continue
+            print(i, ': cat=', cat, ' label_first_idx=', label_first_idx[i], ', [', start_idx, ',', end_idx, ')')
+            if random.random() < training_ratio:
+                train_ind.extend(range(start_idx, end_idx))
+
+            else:
+                test_ind.extend(range(start_idx, end_idx))
 
     train_dataset = {'features': Features[train_ind, :],
                      'labels': Labels[train_ind, :]}
-
     test_dataset = {'features': Features[test_ind, :],
                     'labels': Labels[test_ind, :]}
+
+    #train_dataset = {'features': Features[test_ind, :],
+    #                 'labels': Labels[test_ind, :]}
+    #test_dataset = {'features': Features[train_ind, :],
+    #                'labels': Labels[train_ind, :]}
 
     print('train feature shape:', train_dataset['features'].shape, ', label shape:', train_dataset['labels'].shape)
     print('test feature shape:', test_dataset['features'].shape, ', label shape:', test_dataset['labels'].shape)
@@ -1958,7 +2230,7 @@ with skip_run('skip', 'Learn dynamics model from windows spanning multiple image
 
     if train_model:
         print('Train the model on: {}'.format(device))
-        NN_trn_ars, NN_trn_val, NN_tst_ars, NN_tst_val = net.train_model(train_dataloader, test_dataloader, optimizer, scheduler=scheduler, batch_size=batch_size, epochs=2000)
+        NN_trn_ars, NN_trn_val, NN_tst_ars, NN_tst_val = net.train_model(train_dataloader, test_dataloader, optimizer, scheduler=scheduler, batch_size=batch_size, epochs=3000)
     else:
         torch_file = 'MultiModal_model_' + str(NN_model_dic[str(step_size)]) + '/net_500.pth'
 
@@ -1974,25 +2246,20 @@ with skip_run('skip', 'Learn dynamics model from windows spanning multiple image
         NN_tst_ars = tst_results['Arousal']
         NN_tst_val = tst_results['Valence']
 
-    print(NN_trn_ars.shape, NN_trn_val.shape, NN_tst_ars.shape, NN_tst_val.shape)
+    input('press any key to end ...')
+    sys.exit(0)
 
-    ax1[0, 1].hist(NN_tst_ars, bins=n_bins)
-    ax1[0, 1].set_title('Arousal-DNN ({})'.format(step_size))
-    ax1[0, 1].set_xlim([0, 4])
-    ax1[0, 1].set_ylim([0, 6000])
+    fig1, ax1 = plt.subplots(1, 2, sharex=True, sharey=True)
+    ax1[0].hist(NN_tst_ars, bins=n_bins)
+    ax1[0].set_title('Arousal-DNN ({})'.format(step_size))
+    ax1[0].set_xlim([0, 4])
+    ax1[0].set_ylim([0, 6000])
 
-    ax1[1, 1].hist(NN_tst_val, bins=n_bins)
-    ax1[1, 1].set_title('Valence-DNN ({})'.format(step_size))
-    ax1[1, 1].set_xlim([0, 4])
-    ax1[1, 1].set_ylim([0, 6000])
+    ax1[1].hist(NN_tst_val, bins=n_bins)
+    ax1[1].set_title('Valence-DNN ({})'.format(step_size))
+    ax1[1].set_xlim([0, 4])
+    ax1[1].set_ylim([0, 6000])
     fig1.suptitle('Error histogram')
-
-    # ax2[0, 1].hist(NN_trn_val, bins=n_bins)
-    # ax2[0, 1].set_title('DNN-Train')
-
-    # ax2[1, 1].hist(NN_tst_val, bins=n_bins)
-    # ax2[1, 1].set_title('DNN-Test')
-    # fig2.suptitle('Valence absolute error')
 
     per_train_data.append((train_categories.shape[0] * 100 / num_cat))
     NN_ars_mean.append(np.mean(NN_tst_ars))

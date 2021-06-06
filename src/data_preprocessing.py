@@ -272,9 +272,10 @@ def parse_hri_data_with_transition(modality, filepath, col_names, skiprows, usec
     # frame offset between windows
     sliding_window = int((1 - config['hri']['percent_overlap']) * config['hri']['sfreq'][modality])
 
-    print('modality:', modality)
+    print('- modality:', modality)
     print('df shape:', df.shape)
     print('epoch_len:', epoch_len)
+    print('sliding_window:', sliding_window)
     # split the data based on the events mentioned in pics.csv
     for eve in range(0, df.shape[0], sliding_window):
         if (eve + epoch_len) <= df.shape[0]:
@@ -453,6 +454,7 @@ def read_raw_hri_dataset_with_transition(load_path, config, save_path=None, stan
     Returns:
         dictionary: dictionary of imported data from the files
     """
+    print('transition_delay_time:', transition_delay_time)
     Data = collections.defaultdict(dict)
 
     for subject, dir in enumerate(os.listdir(Path(__file__).parents[1] / load_path)):
@@ -460,6 +462,8 @@ def read_raw_hri_dataset_with_transition(load_path, config, save_path=None, stan
 
         # there are two scenarios
         for scenario_type in scenarios:
+            print('---- subject:', subject, 'scenario:', scenario_type)
+
             event_dic = collections.defaultdict(dict)
             event_time, valence, arousal = [], [], []
 
@@ -498,6 +502,7 @@ def read_raw_hri_dataset_with_transition(load_path, config, save_path=None, stan
 
                     features = np.concatenate(epochs, axis=0)
                     labels   = np.concatenate(labels, axis=0)
+                    print('feature size:', features.shape)
 
                     if modality.lower() == 'ecg':
                         event_dic['labels'] = labels
@@ -506,8 +511,6 @@ def read_raw_hri_dataset_with_transition(load_path, config, save_path=None, stan
                     event_dic[modality.upper()] = features
 
             data['event'+ str(scenario_type)] = event_dic
-
-            print('subject:', subject, 'scenario:', scenario_type, ', feature size:', event_dic[modality.upper()].shape)
 
         Data['S' + str(subject+1)] = data
 

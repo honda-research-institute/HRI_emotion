@@ -137,13 +137,18 @@ def extract_all_features(data_dic, config):
     EMG_epochs = data_dic['EMG']
     GSR_epochs = data_dic['GSR']
     PPG_epochs = data_dic['PPG']
-    # RSP_epochs = data_dic['RSP']
+    ## RSP_epochs = data_dic['RSP']
 
+    print ('-- PPG')
     [hri_ppg.append(extract_ppg_features(signal.reshape(-1, ), sampling_rate=sample_freq['ppg'])) for signal in tqdm(PPG_epochs)]
+    print('-- ECG')
     [hri_ecg.append(extract_ecg_features(signal.reshape(-1, ), sampling_rate=sample_freq['ecg'])) for signal in tqdm(ECG_epochs)]
+    print('-- EMG')
     [hri_emg.append(extract_emg_features(signal.reshape(-1, 3), sampling_rate=sample_freq['emg'])) for signal in tqdm(EMG_epochs)]
+    print('-- GSR')
     [hri_gsr.append(extract_gsr_features(signal.reshape(-1, ), sampling_rate=sample_freq['gsr'])) for signal in tqdm(GSR_epochs)]
-    # [hri_rsp.append(extract_rsp_features(signal.reshape(-1, ), sampling_rate=sample_freq['rsp'])) for signal in tqdm(RSP_epochs)]
+    ## [hri_rsp.append(extract_rsp_features(signal.reshape(-1, ), sampling_rate=sample_freq['rsp'])) for signal in tqdm(RSP_epochs)]
+    print('extraction completed')
 
     hri_labels.append(data_dic['labels'])
 
@@ -151,7 +156,7 @@ def extract_all_features(data_dic, config):
     hri_emg     = np.concatenate(hri_emg, axis=0)
     hri_gsr     = np.concatenate(hri_gsr, axis=0)
     hri_ppg     = np.concatenate(hri_ppg, axis=0)
-    # hri_rsp     = np.concatenate(hri_rsp, axis=0)
+    ## hri_rsp     = np.concatenate(hri_rsp, axis=0)
 
     hri_labels  = np.concatenate(hri_labels, axis=0)
 
@@ -159,7 +164,7 @@ def extract_all_features(data_dic, config):
             'EMG': hri_emg,
             'GSR': hri_gsr,
             'PPG': hri_ppg,
-            # 'RSP': hri_rsp,
+            ## 'RSP': hri_rsp,
             'labels': hri_labels}
 
     return data
