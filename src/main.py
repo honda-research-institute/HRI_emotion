@@ -40,7 +40,10 @@ from data_preprocessing import (read_raw_dreamer_dataset, read_raw_wesad_dataset
 from feature_extraction import extract_gsr_features, extract_all_features
 from Regression_models import train_test_regression_model, test_pretrained_regression_model
 
-config_name = 'config.yml'
+# usual (window size = 10s)
+#config_name = 'config.yml'
+# small window for LSTM
+config_name = 'config_w1.yml'
 config = yaml.load(open(Path(__file__).resolve().parents[1] / config_name), Loader=yaml.SafeLoader)
 window_len = config['freq'] * config['window_size']
 
@@ -1825,12 +1828,12 @@ with skip_run('run', 'Learn dynamics model using raw data from windows spanning 
     train_model = True
     data_dic = dd.io.load(config['hri']['interim_transition'])
     # dictionary of subject: [train_ratio, test_ratio]
-    target_subs = {'S3': [0.2, 0.8],
+    target_subs = {'S1': [0.5, 0.5],
                    }
 
     # use LSTM if sequence_length > 1
-    sequence_length = 1
-    # sequence_length = 10
+    # sequence_length = 1
+    sequence_length = 10
 
     # 'ECG', 'EMG', 'GSR', or 'PPG'
     # modalities = ['ECG', 'EMG', 'PPG', 'GSR']
@@ -1977,12 +1980,14 @@ with skip_run('run', 'Learn dynamics model using raw data from windows spanning 
     # randomly divide into training and testing set
     train_ind = []
     test_ind = []
+    offset = round(config['hri']['transition_delay_time'] / (1.0 - config['hri']['percent_overlap']))
+    print('offset:', offset)
     random.seed(10)
     for i, (cat, sub) in enumerate(zip(categories, cat_sub)):
         # find non-neutral image sandwitched by neutral images
         if i > 0 and i < len(categories)-1 and cat != 0 and categories[i-1] == 0 and categories[i+1] == 0:
-            start_idx = max(0, label_first_idx[i-1])
-            end_idx = min(Labels.shape[0], label_first_idx[i+1])
+            start_idx = max(0, label_first_idx[i-1] + offset)
+            end_idx = min(Labels.shape[0], label_first_idx[i+1] + offset)
             # ignore if event_end_idx is in [start_idx, end_idx)
             event_border = False
             for idx in event_end_idx:
