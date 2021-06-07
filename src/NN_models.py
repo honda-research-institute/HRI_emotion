@@ -1176,10 +1176,10 @@ class EmotionNet(nn.Module):
 # Multi-modal EMOTION recognition using raw data and Conv1d
 class EmotionNetConv1d(EmotionNet):
 
-    def __init__(self, seq_length, num_in_channels=1, device=torch.device("cpu"), config=[]):
+    def __init__(self, window_length, num_in_channels=1, device=torch.device("cpu"), config=[]):
         super(EmotionNetConv1d, self).__init__(num_feats=0, device=device, config=config)
 
-        self.seq_length = seq_length
+        self.window_length = window_length
         self.num_in_channels = num_in_channels
 
         # self.network = 'small'
@@ -1275,7 +1275,7 @@ class EmotionNetConv1d(EmotionNet):
 
     def forward(self, x):
         # conv1d layers
-        conv_in = x.view(-1, self.num_in_channels, self.seq_length)
+        conv_in = x.view(-1, self.num_in_channels, self.window_length)
         conv_out = self.conv_layer1(conv_in)
         # conv_out = F.max_pool1d(conv_out, kernel_size=8, stride=2)
         # conv_out = F.avg_pool1d(conv_out, kernel_size=8, stride=2)
@@ -1302,9 +1302,9 @@ class EmotionNetLSTM(EmotionNet):
         n_lstm_layers = 1
         self.seq_len = seq_len
         # output (arousal, valence)
-        self.lstm_hidden_size = 128
+        self.lstm_hidden_size = 64
         lstm = nn.LSTM(num_feats, self.lstm_hidden_size, n_lstm_layers, batch_first=True)
-        dense = self.fully_connect_block(self.lstm_hidden_size, 2, 0.0)
+        dense = self.fully_connect_block(self.lstm_hidden_size, 2, 0.05)
         self.dense_net = nn.ModuleDict({
             'lstm': lstm,
             'dense': dense

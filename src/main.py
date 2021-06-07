@@ -40,7 +40,8 @@ from data_preprocessing import (read_raw_dreamer_dataset, read_raw_wesad_dataset
 from feature_extraction import extract_gsr_features, extract_all_features
 from Regression_models import train_test_regression_model, test_pretrained_regression_model
 
-config = yaml.load(open(Path(__file__).resolve().parents[1] / 'config.yml'), Loader=yaml.SafeLoader)
+config_name = 'config_w1.yml'
+config = yaml.load(open(Path(__file__).resolve().parents[1] / config_name), Loader=yaml.SafeLoader)
 window_len = config['freq'] * config['window_size']
 
 
@@ -1827,6 +1828,10 @@ with skip_run('run', 'Learn dynamics model using raw data from windows spanning 
     target_subs = {'S3': [0.2, 0.8],
                    }
 
+    # use LSTM if sequence_length > 1
+    # sequence_length = 1
+    sequence_length = 10
+
     # 'ECG', 'EMG', 'GSR', or 'PPG'
     # modalities = ['ECG', 'EMG', 'PPG', 'GSR']
     modalities = ['ECG', 'EMG', 'PPG']
@@ -1870,20 +1875,28 @@ with skip_run('run', 'Learn dynamics model using raw data from windows spanning 
                 org_data = data_dic[sub][event][modality]
                 # org_data: [n_windows, n_channels, n_frames]
                 print(modality, ' org_data shape:', org_data.shape)
-                # resample to make the number of frames in a window becomes the same
-                interval = float(max_frames / org_data.shape[2])
-                new_data = np.zeros([org_data.shape[0], org_data.shape[1], max_frames])
-                for i in range(org_data.shape[2]):
-                    cur_index = round(interval * i)
-                    next_index = round(interval * (i+1))
-                    new_data[:, :, cur_index:next_index] = org_data[:, :, i:i+1]
+                if sequence_length == 1:
+                    # resample to make the number of frames in a window becomes the same
+                    interval = float(max_frames / org_data.shape[2])
+                    new_data = np.zeros([org_data.shape[0], org_data.shape[1], max_frames])
+                    for i in range(org_data.shape[2]):
+                        cur_index = round(interval * i)
+                        next_index = round(interval * (i+1))
+                        new_data[:, :, cur_index:next_index] = org_data[:, :, i:i+1]
+
+                else:
+                    # just flatten
+                    new_data = org_data.reshape(org_data.shape[0], -1)
 
                 features.append(new_data)
                 print(modality, ' new shape:', features[-1].shape)
 
-            n_windows = min([f.shape[0] for f in features])
-            n_frames = min([f.shape[2] for f in features])
-            features = [f[0:n_windows, :, 0:n_frames] for f in features]
+            # if Conv1d is used, number of windows and features must be the same across modalities
+            if sequence_length == 1:
+                n_windows = min([f.shape[0] for f in features])
+                n_frames = min([f.shape[-1] for f in features])
+                features = [f[0:n_windows, :, 0:n_frames] for f in features]
+
             features = np.concatenate(features, axis=1)
             print('features size:', features.shape)
             Features.append(features)
@@ -1980,15 +1993,30 @@ with skip_run('run', 'Learn dynamics model using raw data from windows spanning 
                 if idx >= start_idx and idx < end_idx:
                     event_border = True
                     break
+
             if event_border:
                 continue
-            #print(i, ': cat=', cat, ' label_first_idx=', label_first_idx[i], ', [', start_idx, ',', end_idx, ')')
+
             r = random.random()
             if r <= target_subs[sub][0]:
-                train_ind.extend(range(start_idx, end_idx))
+                # Conv1d: just add [start_idx, end_idx)
+                if sequence_length == 1:
+                    train_ind.extend(range(start_idx, end_idx))
+
+                # LSTM: create windows of sequence_length frames
+                else:
+                    for f in range(start_idx, end_idx - sequence_length + 1):
+                        train_ind.extend(range(f, f + sequence_length))
 
             elif r <= target_subs[sub][0] + target_subs[sub][1]:
-                test_ind.extend(range(start_idx, end_idx))
+                # Conv1d: just add [start_idx, end_idx)
+                if sequence_length == 1:
+                    test_ind.extend(range(start_idx, end_idx))
+
+                # LSTM: create windows of sequence_length frames
+                else:
+                    for f in range(start_idx, end_idx - sequence_length + 1):
+                        test_ind.extend(range(f, f + sequence_length))
 
     train_dataset = {'features': Features[train_ind, :],
                      'labels': Labels[train_ind, :]}
@@ -2002,13 +2030,19 @@ with skip_run('run', 'Learn dynamics model using raw data from windows spanning 
     test_data  = MultiFeatDataset(test_dataset, balance_data=False)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    batch_size = 128
-    net = EmotionNetConv1d(seq_length=train_dataset['features'].shape[2], num_in_channels=train_dataset['features'].shape[1], device=device, config=config)
+    # Conv1d
+    if sequence_length == 1:
+        batch_size = 128
+        net = EmotionNetConv1d(window_length=train_dataset['features'].shape[2], num_in_channels=train_dataset['features'].shape[1], device=device, config=config)
+
+    else:
+        batch_size = 8
+        net = EmotionNetLSTM(num_feats=train_dataset['features'].shape[1], seq_len=sequence_length, device=device, config=config)
 
     net.to(device)
 
-    train_dataloader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=False)
-    test_dataloader  = torch.utils.data.DataLoader(test_data, batch_size=batch_size, shuffle=False)
+    train_dataloader = torch.utils.data.DataLoader(train_data, batch_size=sequence_length*batch_size, shuffle=False)
+    test_dataloader  = torch.utils.data.DataLoader(test_data, batch_size=sequence_length*batch_size, shuffle=False)
 
     # see if an exponential decay learning rate scheduler is required
     # optimizer = optim.SGD(net.parameters(), lr=0.01, momentum=0.9)
