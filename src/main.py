@@ -40,7 +40,7 @@ from data_preprocessing import (read_raw_dreamer_dataset, read_raw_wesad_dataset
 from feature_extraction import extract_gsr_features, extract_all_features
 from Regression_models import train_test_regression_model, test_pretrained_regression_model
 
-config_name = 'config_w1.yml'
+config_name = 'config.yml'
 config = yaml.load(open(Path(__file__).resolve().parents[1] / config_name), Loader=yaml.SafeLoader)
 window_len = config['freq'] * config['window_size']
 
@@ -1829,8 +1829,8 @@ with skip_run('run', 'Learn dynamics model using raw data from windows spanning 
                    }
 
     # use LSTM if sequence_length > 1
-    # sequence_length = 1
-    sequence_length = 10
+    sequence_length = 1
+    # sequence_length = 10
 
     # 'ECG', 'EMG', 'GSR', or 'PPG'
     # modalities = ['ECG', 'EMG', 'PPG', 'GSR']
@@ -1978,15 +1978,11 @@ with skip_run('run', 'Learn dynamics model using raw data from windows spanning 
     train_ind = []
     test_ind = []
     random.seed(10)
-    dt = 1.0 - config['hri']['percent_overlap']
-    n_backward_frames = round((config['hri']['event_window'] + config['hri']['transition_delay_time'] - config['window_size']) / dt)
-    n_forward_frames = round((config['window_size'] - config['hri']['transition_delay_time']) / dt)
-    print('n_backward_frames:', n_backward_frames, ', n_forward_frames:', n_forward_frames)
     for i, (cat, sub) in enumerate(zip(categories, cat_sub)):
         # find non-neutral image sandwitched by neutral images
         if i > 0 and i < len(categories)-1 and cat != 0 and categories[i-1] == 0 and categories[i+1] == 0:
-            start_idx = max(0, label_first_idx[i] - n_backward_frames)
-            end_idx = min(Labels.shape[0], label_first_idx[i+1] + n_forward_frames)
+            start_idx = max(0, label_first_idx[i-1])
+            end_idx = min(Labels.shape[0], label_first_idx[i+1])
             # ignore if event_end_idx is in [start_idx, end_idx)
             event_border = False
             for idx in event_end_idx:
