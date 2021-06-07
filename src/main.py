@@ -1900,6 +1900,10 @@ with skip_run('run', 'Learn dynamics model using raw data from windows spanning 
                 n_frames = min([f.shape[-1] for f in features])
                 features = [f[0:n_windows, :, 0:n_frames] for f in features]
 
+            else:
+                n_windows = min([f.shape[0] for f in features])
+                features = [f[0:n_windows, :] for f in features]
+
             features = np.concatenate(features, axis=1)
             print('features size:', features.shape)
             Features.append(features)
